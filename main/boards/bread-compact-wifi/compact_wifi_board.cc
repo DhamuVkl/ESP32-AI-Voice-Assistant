@@ -9,7 +9,7 @@
 #include "lamp_controller.h"
 #include "led/circular_strip.h"
 #include "assets/lang_config.h"
-#include "audio/wake_words/afe_wake_word.h"
+
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -35,7 +35,6 @@ private:
     Button volume_up_button_;
     Button volume_down_button_;
     CircularStrip *led_strip_ = nullptr;
-    AfeWakeWord *wake_word_ = nullptr; // Add wake word detection instance
     void InitializeDisplayI2c()
     {
         i2c_master_bus_config_t bus_config = {
@@ -152,24 +151,7 @@ private:
             GetDisplay()->ShowNotification(Lang::Strings::MUTED); });
     }
 
-    void InitializeWakeWord()
-    {
-        wake_word_ = new AfeWakeWord();
-        if (!wake_word_->Initialize(GetAudioCodec(), nullptr))
-        {
-            ESP_LOGE(TAG, "Failed to initialize wake word detection");
-            delete wake_word_;
-            wake_word_ = nullptr;
-            return;
-        }
-
-        wake_word_->OnWakeWordDetected([](const std::string &wake_word)
-                                       {
-            ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-            Application::GetInstance().StartListening(); });
-
-        wake_word_->Start();
-    }
+ 
 
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools()
@@ -177,17 +159,7 @@ private:
         static LampController lamp(LAMP_GPIO);
     }
 
-    void FeedWakeWord()
-    {
-        if (wake_word_ == nullptr)
-        {
-            return;
-        }
-
-        std::vector<int16_t> audio_data(wake_word_->GetFeedSize());
-        GetAudioCodec()->Read(audio_data.data(), audio_data.size());
-        wake_word_->Feed(audio_data);
-    }
+   
 
 public:
     CompactWifiBoard() : boot_button_(BOOT_BUTTON_GPIO),
@@ -204,14 +176,11 @@ public:
         led_strip_ = new CircularStrip(BUILTIN_LED_GPIO, 4); //  LEDs in the strip
         led_strip_->SetBrightness(64, 4);                    // Increase brightness (default: 32, 4)
 
-        // Initialize wake word detection
-        InitializeWakeWord();
     }
 
     virtual ~CompactWifiBoard()
     {
         delete led_strip_;
-        delete wake_word_;
     }
 
     virtual Led *GetLed() override
@@ -236,14 +205,6 @@ public:
         return display_;
     }
 
-    void Run()
-    {
-        while (true)
-        {
-            FeedWakeWord();
-            vTaskDelay(pdMS_TO_TICKS(10)); // Adjust delay as needed
-        }
-    }
 };
 
 DECLARE_BOARD(CompactWifiBoard);
