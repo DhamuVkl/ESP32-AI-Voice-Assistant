@@ -7,8 +7,9 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
-#include "led/single_led.h"
+#include "led/circular_strip.h"
 #include "assets/lang_config.h"
+#include "audio/wake_words/afe_wake_word.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -22,18 +23,21 @@
 
 #define TAG "CompactWifiBoard"
 
-class CompactWifiBoard : public WifiBoard {
+class CompactWifiBoard : public WifiBoard
+{
 private:
     i2c_master_bus_handle_t display_i2c_bus_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    Display* display_ = nullptr;
+    Display *display_ = nullptr;
     Button boot_button_;
     Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
-
-    void InitializeDisplayI2c() {
+    CircularStrip *led_strip_ = nullptr;
+    AfeWakeWord *wake_word_ = nullptr; // Add wake word detection instance
+    void InitializeDisplayI2c()
+    {
         i2c_master_bus_config_t bus_config = {
             .i2c_port = (i2c_port_t)0,
             .sda_io_num = DISPLAY_SDA_PIN,
@@ -49,7 +53,8 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
     }
 
-    void InitializeSsd1306Display() {
+    void InitializeSsd1306Display()
+    {
         // SSD1306 config
         esp_lcd_panel_io_i2c_config_t io_config = {
             .dev_addr = 0x3C,
@@ -87,7 +92,8 @@ private:
 
         // Reset the display
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
-        if (esp_lcd_panel_init(panel_) != ESP_OK) {
+        if (esp_lcd_panel_init(panel_) != ESP_OK)
+        {
             ESP_LOGE(TAG, "Failed to initialize display");
             display_ = new NoDisplay();
             return;
@@ -101,87 +107,142 @@ private:
         display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
-    void InitializeButtons() {
-        boot_button_.OnClick([this]() {
+    void InitializeButtons()
+    {
+        boot_button_.OnClick([this]()
+                             {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 ResetWifiConfiguration();
             }
-            app.ToggleChatState();
-        });
-        touch_button_.OnPressDown([this]() {
-            Application::GetInstance().StartListening();
-        });
-        touch_button_.OnPressUp([this]() {
-            Application::GetInstance().StopListening();
-        });
+            app.ToggleChatState(); });
+        touch_button_.OnPressDown([this]()
+                                  { Application::GetInstance().StartListening(); });
+        touch_button_.OnPressUp([this]()
+                                { Application::GetInstance().StopListening(); });
 
-        volume_up_button_.OnClick([this]() {
+        volume_up_button_.OnClick([this]()
+                                  {
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
             if (volume > 100) {
                 volume = 100;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
-        });
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume)); });
 
-        volume_up_button_.OnLongPress([this]() {
+        volume_up_button_.OnLongPress([this]()
+                                      {
             GetAudioCodec()->SetOutputVolume(100);
-            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
-        });
+            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME); });
 
-        volume_down_button_.OnClick([this]() {
+        volume_down_button_.OnClick([this]()
+                                    {
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() - 10;
             if (volume < 0) {
                 volume = 0;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
-        });
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume)); });
 
-        volume_down_button_.OnLongPress([this]() {
+        volume_down_button_.OnLongPress([this]()
+                                        {
             GetAudioCodec()->SetOutputVolume(0);
-            GetDisplay()->ShowNotification(Lang::Strings::MUTED);
-        });
+            GetDisplay()->ShowNotification(Lang::Strings::MUTED); });
+    }
+
+    void InitializeWakeWord()
+    {
+        wake_word_ = new AfeWakeWord();
+        if (!wake_word_->Initialize(GetAudioCodec(), nullptr))
+        {
+            ESP_LOGE(TAG, "Failed to initialize wake word detection");
+            delete wake_word_;
+            wake_word_ = nullptr;
+            return;
+        }
+
+        wake_word_->OnWakeWordDetected([](const std::string &wake_word)
+                                       {
+            ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+            Application::GetInstance().StartListening(); });
+
+        wake_word_->Start();
     }
 
     // 物联网初始化，逐步迁移到 MCP 协议
-    void InitializeTools() {
+    void InitializeTools()
+    {
         static LampController lamp(LAMP_GPIO);
     }
 
+    void FeedWakeWord()
+    {
+        if (wake_word_ == nullptr)
+        {
+            return;
+        }
+
+        std::vector<int16_t> audio_data(wake_word_->GetFeedSize());
+        GetAudioCodec()->Read(audio_data.data(), audio_data.size());
+        wake_word_->Feed(audio_data);
+    }
+
 public:
-    CompactWifiBoard() :
-        boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO),
-        volume_up_button_(VOLUME_UP_BUTTON_GPIO),
-        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
+    CompactWifiBoard() : boot_button_(BOOT_BUTTON_GPIO),
+                         touch_button_(TOUCH_BUTTON_GPIO),
+                         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
+                         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO)
+    {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+
+        // Initialize the CircularStrip with GPIO and number of LEDs
+        led_strip_ = new CircularStrip(BUILTIN_LED_GPIO, 4); //  LEDs in the strip
+        led_strip_->SetBrightness(64, 4);                    // Increase brightness (default: 32, 4)
+
+        // Initialize wake word detection
+        InitializeWakeWord();
     }
 
-    virtual Led* GetLed() override {
-        static SingleLed led(BUILTIN_LED_GPIO);
-        return &led;
+    virtual ~CompactWifiBoard()
+    {
+        delete led_strip_;
+        delete wake_word_;
     }
 
-    virtual AudioCodec* GetAudioCodec() override {
+    virtual Led *GetLed() override
+    {
+        return led_strip_;
+    }
+
+    virtual AudioCodec *GetAudioCodec() override
+    {
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
         static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
+                                               AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
 #else
         static NoAudioCodecDuplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
+                                              AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
 #endif
         return &audio_codec;
     }
 
-    virtual Display* GetDisplay() override {
+    virtual Display *GetDisplay() override
+    {
         return display_;
+    }
+
+    void Run()
+    {
+        while (true)
+        {
+            FeedWakeWord();
+            vTaskDelay(pdMS_TO_TICKS(10)); // Adjust delay as needed
+        }
     }
 };
 
